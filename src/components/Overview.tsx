@@ -1,8 +1,8 @@
 import { useStore, useHostInventory } from '../stores/useStore';
-import { DEFAULT_HOST_TYPES, CLUSTER_NAMES, CLUSTER_SOCKET_FACTOR, ClusterType } from '../types';
+import { DEFAULT_HOST_TYPES, CLUSTER_NAMES, CLUSTER_SOCKET_FACTOR, ClusterType, calculateRequiredHosts } from '../types';
 
 function Overview() {
-  const { customers, vmTypes, customerVMs, hostAdditions } = useStore();
+  const { customers, vmTypes, customerVMs } = useStore();
   const hostInventory = useHostInventory();
 
   const clusters: ClusterType[] = ['singlesite-b', 'singlesite-z', 'itbc'];
@@ -28,19 +28,28 @@ function Overview() {
     return { total, bew, zoi, itbc };
   };
 
-  // Build customer data for a cluster (same logic as CapacityPlanning)
+  // Build customer data for a cluster with ITBC host pairing logic
   const buildClusterData = (cluster: ClusterType) => {
     const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
-    const socketFactor = CLUSTER_SOCKET_FACTOR[cluster];
 
-    // Get host additions for this cluster, sorted by date
-    const clusterHostAdditions = hostAdditions
-      .filter((ha) => clusterHostTypes.some((ht) => ht.id === ha.hostTypeId))
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // Track cumulative base sockets (without 2x factor) per host type
+    const cumulativeBaseSockets: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      cumulativeBaseSockets[ht.id] = 0;
+    });
 
-    let usedHostAdditions = 0;
-    let runningCapacity = 0;
-    let runningUsage = 0;
+    // Track how many hosts are available (from hostAdditions)
+    const availableHosts: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+      availableHosts[ht.id] = inv?.totalHosts || 0;
+    });
+
+    // Track hosts already assigned to previous customers
+    const assignedHosts: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      assignedHosts[ht.id] = 0;
+    });
 
     const customerData: Record<string, {
       hasVMs: boolean;
@@ -60,16 +69,16 @@ function Overview() {
         return {
           vmTypeName: vmType?.name || '?',
           count: vm.count,
-          sockets: vmType ? vm.count * vmType.sockets * socketFactor : 0,
+          // Base sockets (without 2x factor)
+          baseSockets: vmType ? vm.count * vmType.sockets : 0,
+          allowedHostTypes: vmType?.allowedHostTypes || [],
         };
       });
-
-      const customerSockets = vms.reduce((sum, vm) => sum + vm.sockets, 0);
 
       if (customerClusterVMs.length === 0) {
         customerData[customer.id] = {
           hasVMs: false,
-          vms: [],
+          vms: vms.map(v => ({ vmTypeName: v.vmTypeName, count: v.count })),
           hostsToAdd: [],
           needsMoreHosts: false,
           socketsShortfall: 0,
@@ -77,38 +86,54 @@ function Overview() {
         return;
       }
 
-      // Calculate how many hosts are needed for this customer
-      const capacityNeeded = runningUsage + customerSockets;
-
-      // Collect hosts to add for this customer
-      const hostsToAdd: { hostType: typeof clusterHostTypes[0]; count: number }[] = [];
-      const hostCounts: Record<string, number> = {};
-
-      while (usedHostAdditions < clusterHostAdditions.length && runningCapacity < capacityNeeded) {
-        const ha = clusterHostAdditions[usedHostAdditions];
-        const ht = DEFAULT_HOST_TYPES.find((h) => h.id === ha.hostTypeId);
-        if (ht) {
-          runningCapacity += ha.count * ht.sockets;
-          hostCounts[ht.id] = (hostCounts[ht.id] || 0) + ha.count;
-        }
-        usedHostAdditions++;
-      }
-
-      // Convert to array
-      Object.entries(hostCounts).forEach(([htId, count]) => {
-        const ht = clusterHostTypes.find((h) => h.id === htId);
-        if (ht && count > 0) {
-          hostsToAdd.push({ hostType: ht, count });
+      // Add this customer's base sockets to cumulative totals per host type
+      vms.forEach((vm) => {
+        const allowedInCluster = vm.allowedHostTypes.filter((htId) =>
+          clusterHostTypes.some((ht) => ht.id === htId)
+        );
+        if (allowedInCluster.length > 0) {
+          // Assign to first allowed host type
+          cumulativeBaseSockets[allowedInCluster[0]] += vm.baseSockets;
         }
       });
 
-      runningUsage += customerSockets;
-      const needsMoreHosts = runningUsage > runningCapacity;
-      const socketsShortfall = Math.max(0, runningUsage - runningCapacity);
+      // Calculate hosts needed per host type using ITBC-aware formula
+      const hostsToAdd: { hostType: typeof clusterHostTypes[0]; count: number }[] = [];
+      let needsMoreHosts = false;
+      let socketsShortfall = 0;
+
+      clusterHostTypes.forEach((ht) => {
+        const baseSockets = cumulativeBaseSockets[ht.id];
+        if (baseSockets <= 0) return;
+
+        // Calculate total hosts required using ITBC formula
+        const totalHostsRequired = calculateRequiredHosts(baseSockets, ht.sockets, cluster);
+        const available = availableHosts[ht.id];
+        const alreadyAssigned = assignedHosts[ht.id];
+
+        // Hosts to add for this customer = new requirement - already assigned
+        const newHostsNeeded = Math.max(0, totalHostsRequired - alreadyAssigned);
+
+        if (newHostsNeeded > 0) {
+          // Check if we have enough hosts available
+          const canAssign = Math.min(newHostsNeeded, available - alreadyAssigned);
+          if (canAssign > 0) {
+            hostsToAdd.push({ hostType: ht, count: canAssign });
+            assignedHosts[ht.id] += canAssign;
+          }
+
+          // Check if still short
+          const stillNeeded = totalHostsRequired - assignedHosts[ht.id];
+          if (stillNeeded > 0) {
+            needsMoreHosts = true;
+            socketsShortfall += stillNeeded * ht.sockets;
+          }
+        }
+      });
 
       customerData[customer.id] = {
         hasVMs: true,
-        vms,
+        vms: vms.map(v => ({ vmTypeName: v.vmTypeName, count: v.count })),
         hostsToAdd,
         needsMoreHosts,
         socketsShortfall,

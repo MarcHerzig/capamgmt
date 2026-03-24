@@ -1,16 +1,14 @@
 import { useState } from 'react';
 import { useStore, useHostInventoryWithUsage, useHostInventory } from '../stores/useStore';
-import { DEFAULT_HOST_TYPES, CLUSTER_NAMES, CLUSTER_SOCKET_FACTOR, ClusterType } from '../types';
+import { DEFAULT_HOST_TYPES, CLUSTER_NAMES, CLUSTER_SOCKET_FACTOR, ClusterType, calculateRequiredHosts } from '../types';
 
 function CapacityPlanning() {
   const {
     customers,
     vmTypes,
     customerVMs,
-    hostAdditions,
     addHost,
     removeHost,
-    deleteHostAddition,
     addCustomerVM,
     removeCustomerVM,
   } = useStore();
@@ -86,19 +84,18 @@ function CapacityPlanning() {
     vt.allowedHostTypes.some((htId) => clusterHostTypes.some((ht) => ht.id === htId))
   );
 
-  // Build customer-based timeline data
+  // Build customer-based timeline data with ITBC host pairing logic
   type CustomerBlock = {
     customer: typeof customers[0];
-    vms: { vmTypeId: string; vmTypeName: string; count: number; sockets: number; allowedHostTypes: string[] }[];
+    vms: { vmTypeId: string; vmTypeName: string; count: number; sockets: number; baseSockets: number; allowedHostTypes: string[] }[];
     customerSockets: number;
     neededHostTypes: string[];
-    hostsAddedBefore: typeof hostAdditions;
-    runningCapacityBefore: number;
-    runningCapacityAfter: number;
-    runningUsageAfter: number;
+    hostsToAdd: { hostType: typeof clusterHostTypes[0]; count: number }[];
+    runningHostsRequired: Record<string, number>;
+    runningHostsAssigned: Record<string, number>;
     needsMoreHosts: boolean;
     missingHostTypes: string[];
-    socketsShortfall: number;
+    hostsShortfall: { hostType: typeof clusterHostTypes[0]; count: number }[];
   };
 
   const buildCustomerBlocks = (): CustomerBlock[] => {
@@ -106,19 +103,29 @@ function CapacityPlanning() {
     const allCustomersSorted = [...customers]
       .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 
-    // Get host additions for this cluster, sorted by date
-    const clusterHostAdditions = hostAdditions
-      .filter((ha) => clusterHostTypes.some((ht) => ht.id === ha.hostTypeId))
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // Track cumulative base sockets (without 2x factor) per host type
+    const cumulativeBaseSockets: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      cumulativeBaseSockets[ht.id] = 0;
+    });
 
-    let usedHostAdditions = 0;
-    let runningCapacity = 0;
-    let runningUsage = 0;
+    // Track available hosts (total from inventory)
+    const availableHosts: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+      availableHosts[ht.id] = inv?.totalHosts || 0;
+    });
+
+    // Track hosts already assigned to previous customers
+    const assignedHosts: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      assignedHosts[ht.id] = 0;
+    });
 
     return allCustomersSorted.map((customer) => {
       const customerClusterVMs = clusterVMs.filter((vm) => vm.customerId === customer.id);
 
-      // Build VM list
+      // Build VM list with base sockets (without 2x factor)
       const vms = customerClusterVMs.map((vm) => {
         const vmType = vmTypes.find((vt) => vt.id === vm.vmTypeId);
         return {
@@ -126,6 +133,7 @@ function CapacityPlanning() {
           vmTypeName: vmType?.name || '?',
           count: vm.count,
           sockets: vmType ? vm.count * vmType.sockets * socketFactor : 0,
+          baseSockets: vmType ? vm.count * vmType.sockets : 0, // Without 2x factor
           allowedHostTypes: vmType?.allowedHostTypes || [],
         };
       });
@@ -136,47 +144,73 @@ function CapacityPlanning() {
         vm.allowedHostTypes.filter((htId) => clusterHostTypes.some((ht) => ht.id === htId))
       ))];
 
-      // Check which host types are missing
-      const missingHostTypes = neededHostTypes.filter((htId) => {
-        const inv = hostInventory.find((i) => i.hostTypeId === htId);
-        return !inv || inv.totalHosts <= 0;
+      // Add this customer's base sockets to cumulative totals
+      vms.forEach((vm) => {
+        const allowedInCluster = vm.allowedHostTypes.filter((htId) =>
+          clusterHostTypes.some((ht) => ht.id === htId)
+        );
+        if (allowedInCluster.length > 0) {
+          cumulativeBaseSockets[allowedInCluster[0]] += vm.baseSockets;
+        }
       });
 
-      // Hosts added before this customer (we assign hosts to customers in order)
-      const runningCapacityBefore = runningCapacity;
+      // Calculate hosts needed using ITBC-aware formula
+      const hostsToAdd: { hostType: typeof clusterHostTypes[0]; count: number }[] = [];
+      const hostsShortfall: { hostType: typeof clusterHostTypes[0]; count: number }[] = [];
+      const runningHostsRequired: Record<string, number> = {};
+      const runningHostsAssigned: Record<string, number> = {};
+      let needsMoreHosts = false;
 
-      // Calculate how many hosts are needed for this customer
-      const capacityNeeded = runningUsage + customerSockets;
+      clusterHostTypes.forEach((ht) => {
+        const baseSockets = cumulativeBaseSockets[ht.id];
+        // Use ITBC-aware calculation
+        const totalHostsRequired = calculateRequiredHosts(baseSockets, ht.sockets, selectedCluster);
+        runningHostsRequired[ht.id] = totalHostsRequired;
 
-      // Add hosts until we have enough capacity or run out
-      const hostsForThisCustomer: typeof hostAdditions = [];
-      while (usedHostAdditions < clusterHostAdditions.length && runningCapacity < capacityNeeded) {
-        const ha = clusterHostAdditions[usedHostAdditions];
-        const ht = DEFAULT_HOST_TYPES.find((h) => h.id === ha.hostTypeId);
-        runningCapacity += (ha.count) * (ht?.sockets || 0);
-        hostsForThisCustomer.push(ha);
-        usedHostAdditions++;
+        const available = availableHosts[ht.id];
+        const alreadyAssigned = assignedHosts[ht.id];
+
+        // Hosts to add for this customer
+        const newHostsNeeded = Math.max(0, totalHostsRequired - alreadyAssigned);
+
+        if (newHostsNeeded > 0) {
+          const canAssign = Math.min(newHostsNeeded, available - alreadyAssigned);
+          if (canAssign > 0) {
+            hostsToAdd.push({ hostType: ht, count: canAssign });
+            assignedHosts[ht.id] += canAssign;
+          }
+
+          // Check if still short
+          const stillNeeded = totalHostsRequired - assignedHosts[ht.id];
+          if (stillNeeded > 0) {
+            needsMoreHosts = true;
+            hostsShortfall.push({ hostType: ht, count: stillNeeded });
+          }
+        }
+
+        runningHostsAssigned[ht.id] = assignedHosts[ht.id];
+      });
+
+      // Check for missing host types (no hosts at all)
+      const missingHostTypes = neededHostTypes.filter((htId) => {
+        return availableHosts[htId] <= 0;
+      });
+
+      if (missingHostTypes.length > 0) {
+        needsMoreHosts = true;
       }
-
-      const runningCapacityAfter = runningCapacity;
-      runningUsage += customerSockets;
-      const runningUsageAfter = runningUsage;
-
-      const needsMoreHosts = runningUsageAfter > runningCapacityAfter || missingHostTypes.length > 0;
-      const socketsShortfall = Math.max(0, runningUsageAfter - runningCapacityAfter);
 
       return {
         customer,
         vms,
         customerSockets,
         neededHostTypes,
-        hostsAddedBefore: hostsForThisCustomer,
-        runningCapacityBefore,
-        runningCapacityAfter,
-        runningUsageAfter,
+        hostsToAdd,
+        runningHostsRequired,
+        runningHostsAssigned,
         needsMoreHosts,
         missingHostTypes,
-        socketsShortfall,
+        hostsShortfall,
       };
     });
   };
@@ -501,9 +535,11 @@ function CapacityPlanning() {
                     <div className="text-sm text-gray-600">
                       Benötigt: <span className="font-semibold">{block.customerSockets}S</span>
                     </div>
-                    <div className="text-xs text-gray-500">
-                      Kumulativ: {block.runningUsageAfter}S / {block.runningCapacityAfter}S
-                    </div>
+                    {selectedCluster === 'itbc' && block.vms.length > 0 && (
+                      <div className="text-xs text-purple-600">
+                        (Primary + Failover auf versch. Hosts)
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -523,9 +559,11 @@ function CapacityPlanning() {
                             }).join(', ')}
                           </span>
                         )}
-                        {block.socketsShortfall > 0 && (
+                        {block.hostsShortfall.length > 0 && (
                           <span className="text-orange-700 text-sm ml-2">
-                            {block.socketsShortfall}S zusätzlich benötigt
+                            Hosts fehlen: {block.hostsShortfall.map((h) =>
+                              `+${h.count}× ${h.hostType.name}`
+                            ).join(', ')}
                           </span>
                         )}
                       </div>
@@ -544,35 +582,26 @@ function CapacityPlanning() {
                   </div>
                 )}
 
-                {/* Hosts added for this customer */}
-                {block.hostsAddedBefore.length > 0 && (
+                {/* Hosts to add for this customer */}
+                {block.hostsToAdd.length > 0 && (
                   <div className="px-4 py-2 bg-green-50">
                     <div className="text-xs text-gray-500 mb-1">Benötigte Hosts einbauen:</div>
                     <div className="space-y-1">
-                      {block.hostsAddedBefore.map((ha) => {
-                        const ht = DEFAULT_HOST_TYPES.find((h) => h.id === ha.hostTypeId);
-                        return (
-                          <div key={ha.id} className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <span className="text-green-700 font-medium">
-                                🖥️ {ha.count > 0 ? '+' : ''}{ha.count}× {ht?.name}
-                              </span>
-                              <span className="text-green-600 text-xs">
-                                ({(ha.count) * (ht?.sockets || 0)}S)
-                              </span>
-                              <span className="text-gray-400 text-xs">
-                                {new Date(ha.createdAt).toLocaleDateString('de-DE')}
-                              </span>
-                            </div>
-                            <button
-                              onClick={() => deleteHostAddition(ha.id)}
-                              className="text-red-600 hover:text-red-800 text-xs"
-                            >
-                              ×
-                            </button>
-                          </div>
-                        );
-                      })}
+                      {block.hostsToAdd.map((h) => (
+                        <div key={h.hostType.id} className="flex items-center gap-2">
+                          <span className="text-green-700 font-medium">
+                            🖥️ +{h.count}× {h.hostType.name}
+                          </span>
+                          <span className="text-green-600 text-xs">
+                            ({h.count * h.hostType.sockets}S)
+                          </span>
+                          {selectedCluster === 'itbc' && (
+                            <span className="text-purple-600 text-xs">
+                              ({h.count / 2} Primary + {h.count / 2} Failover)
+                            </span>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -649,9 +678,11 @@ function CapacityPlanning() {
                   {block.vms.length === 0 ? (
                     <span>— Keine VMs</span>
                   ) : block.needsMoreHosts ? (
-                    <span>⚠️ Fehlend: {block.socketsShortfall}S</span>
+                    <span>⚠️ Hosts fehlen: {block.hostsShortfall.map((h) =>
+                      `+${h.count}× ${h.hostType.name}`
+                    ).join(', ')}</span>
                   ) : (
-                    <span>✓ OK - Verbleibend: {block.runningCapacityAfter - block.runningUsageAfter}S</span>
+                    <span>✓ OK</span>
                   )}
                 </div>
               </div>

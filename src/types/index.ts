@@ -103,3 +103,50 @@ export const CLUSTER_SOCKET_FACTOR: Record<ClusterType, number> = {
   'singlesite-z': 1,
   'itbc': 2,
 };
+
+/**
+ * Berechnet die benötigte Anzahl Hosts für einen Cluster.
+ *
+ * Für ITBC gilt: Primary und Failover müssen auf verschiedenen Hosts sein.
+ * - Base-Sockets (ohne 2x Faktor) müssen auf Primary-Hosts passen
+ * - Gleiche Kapazität wird auf Failover-Hosts benötigt
+ * - Formel: 2 * ceil(base_sockets / host_sockets)
+ *
+ * Für andere Cluster: ceil(total_sockets / host_sockets)
+ */
+export function calculateRequiredHosts(
+  baseSockets: number,  // Sockets OHNE 2x Faktor
+  hostSockets: number,
+  cluster: ClusterType
+): number {
+  if (baseSockets <= 0) return 0;
+
+  const hostsForPrimary = Math.ceil(baseSockets / hostSockets);
+
+  if (cluster === 'itbc') {
+    // ITBC: Primary + Failover auf verschiedenen Hosts
+    // Mindestens 2 Hosts (1 Primary, 1 Failover)
+    return Math.max(2, hostsForPrimary * 2);
+  }
+
+  // Singlesite: Nur Primary nötig
+  return hostsForPrimary;
+}
+
+/**
+ * Berechnet die effektive Kapazität eines Hosts im Cluster.
+ *
+ * Für ITBC: Jeder Host kann nur 50% seiner Sockets für VMs nutzen,
+ * weil die andere Hälfte für Failover reserviert sein muss.
+ */
+export function getEffectiveHostCapacity(
+  hostSockets: number,
+  cluster: ClusterType
+): number {
+  if (cluster === 'itbc') {
+    // Bei ITBC: Effektive Kapazität ist die Hälfte, weil Failover auf anderem Host sein muss
+    // Aber da wir in Paaren rechnen, ist die effektive Kapazität pro Host-Paar = hostSockets
+    return hostSockets;
+  }
+  return hostSockets;
+}
