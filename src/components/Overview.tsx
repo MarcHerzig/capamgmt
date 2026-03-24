@@ -28,8 +28,44 @@ function Overview() {
     return { total, bew, zoi, itbc };
   };
 
+  // Calculate cumulative socket usage up to and including a customer
+  const getCumulativeUsage = (customerIndex: number, cluster: ClusterType) => {
+    const socketFactor = CLUSTER_SOCKET_FACTOR[cluster];
+    const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
+
+    // Usage per host type up to this customer
+    const usageByHostType: Record<string, number> = {};
+    clusterHostTypes.forEach((ht) => {
+      usageByHostType[ht.id] = 0;
+    });
+
+    // Sum up usage for all customers up to and including this one
+    for (let i = 0; i <= customerIndex; i++) {
+      const customer = sortedCustomers[i];
+      const customerClusterVMs = customerVMs.filter(
+        (vm) => vm.customerId === customer.id && vm.cluster === cluster
+      );
+
+      customerClusterVMs.forEach((vm) => {
+        const vmType = vmTypes.find((vt) => vt.id === vm.vmTypeId);
+        if (!vmType) return;
+
+        // Distribute VM sockets to allowed host types (use first matching)
+        const allowedInCluster = vmType.allowedHostTypes.filter((htId) =>
+          clusterHostTypes.some((ht) => ht.id === htId)
+        );
+        if (allowedInCluster.length > 0) {
+          // Add to first allowed host type
+          usageByHostType[allowedInCluster[0]] += vm.count * vmType.sockets * socketFactor;
+        }
+      });
+    }
+
+    return usageByHostType;
+  };
+
   // Get data for a customer in a specific cluster
-  const getCustomerClusterData = (customerId: string, cluster: ClusterType) => {
+  const getCustomerClusterData = (customerId: string, cluster: ClusterType, customerIndex: number) => {
     const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
     const socketFactor = CLUSTER_SOCKET_FACTOR[cluster];
 
@@ -42,8 +78,7 @@ function Overview() {
         hasVMs: false,
         vms: [],
         totalSockets: 0,
-        neededHostTypes: [],
-        missingHostTypes: [],
+        additionalHosts: [],
         needsHosts: false,
       };
     }
@@ -60,24 +95,31 @@ function Overview() {
 
     const totalSockets = vms.reduce((sum, vm) => sum + vm.sockets, 0);
 
-    // Which host types are needed?
-    const neededHostTypes = [...new Set(vms.flatMap((vm) =>
-      vm.allowedHostTypes.filter((htId) => clusterHostTypes.some((ht) => ht.id === htId))
-    ))];
+    // Calculate cumulative usage up to this customer
+    const cumulativeUsage = getCumulativeUsage(customerIndex, cluster);
 
-    // Which are missing?
-    const missingHostTypes = neededHostTypes.filter((htId) => {
-      const inv = hostInventory.find((i) => i.hostTypeId === htId);
-      return !inv || inv.totalHosts <= 0;
-    });
+    // Calculate additional hosts needed per host type
+    const additionalHosts = clusterHostTypes.map((ht) => {
+      const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+      const availableSockets = (inv?.totalHosts || 0) * ht.sockets;
+      const usedSockets = cumulativeUsage[ht.id] || 0;
+      const shortfall = usedSockets - availableSockets;
+
+      if (shortfall <= 0) {
+        return { hostType: ht, needed: 0 };
+      }
+
+      // Calculate how many hosts needed to cover shortfall
+      const hostsNeeded = Math.ceil(shortfall / ht.sockets);
+      return { hostType: ht, needed: hostsNeeded };
+    }).filter((h) => h.needed > 0);
 
     return {
       hasVMs: true,
       vms,
       totalSockets,
-      neededHostTypes,
-      missingHostTypes,
-      needsHosts: missingHostTypes.length > 0,
+      additionalHosts,
+      needsHosts: additionalHosts.length > 0,
     };
   };
 
@@ -272,7 +314,7 @@ function Overview() {
                   </div>
                 </td>
                 {clusters.map((cluster) => {
-                  const data = getCustomerClusterData(customer.id, cluster);
+                  const data = getCustomerClusterData(customer.id, cluster, index);
 
                   // Determine background color
                   let bgClass = 'bg-gray-50'; // default - no VMs
@@ -298,27 +340,21 @@ function Overview() {
                           <div className="text-sm font-medium text-gray-700">
                             {data.totalSockets}S
                           </div>
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {data.neededHostTypes.map((htId) => {
-                              const ht = DEFAULT_HOST_TYPES.find((h) => h.id === htId);
-                              const isMissing = data.missingHostTypes.includes(htId);
-                              return (
+                          {data.additionalHosts.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {data.additionalHosts.map((h) => (
                                 <span
-                                  key={htId}
-                                  className={`text-xs px-1 py-0.5 rounded ${
-                                    isMissing
-                                      ? 'bg-red-200 text-red-800'
-                                      : 'bg-blue-100 text-blue-700'
-                                  }`}
+                                  key={h.hostType.id}
+                                  className="text-xs px-1.5 py-0.5 rounded bg-red-200 text-red-800 font-medium"
                                 >
-                                  {ht?.name} {isMissing ? '✗' : '✓'}
+                                  +{h.needed} {h.hostType.name}
                                 </span>
-                              );
-                            })}
-                          </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       ) : (
-                        <span className="text-gray-400 text-sm">0</span>
+                        <span className="text-gray-400 text-sm">—</span>
                       )}
                     </td>
                   );
@@ -345,19 +381,15 @@ function Overview() {
           </div>
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-green-50 border border-green-200 rounded"></div>
-            <span>VMs vorhanden, Hosts OK</span>
+            <span>Kapazität OK</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-orange-100 border border-orange-300 rounded"></div>
-            <span>Hosts fehlen</span>
+            <span>Hosts benötigt</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">L ✓</span>
-            <span>Host-Typ vorhanden</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="px-1.5 py-0.5 bg-red-200 text-red-800 text-xs rounded">L ✗</span>
-            <span>Host-Typ fehlt</span>
+            <span className="px-1.5 py-0.5 bg-red-200 text-red-800 text-xs rounded font-medium">+2 L</span>
+            <span>Zusätzliche Hosts einbauen</span>
           </div>
         </div>
       </div>
