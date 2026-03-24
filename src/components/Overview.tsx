@@ -2,7 +2,7 @@ import { useStore, useHostInventory } from '../stores/useStore';
 import { DEFAULT_HOST_TYPES, CLUSTER_NAMES, CLUSTER_SOCKET_FACTOR, ClusterType } from '../types';
 
 function Overview() {
-  const { customers, vmTypes, customerVMs } = useStore();
+  const { customers, vmTypes, customerVMs, hostAdditions } = useStore();
   const hostInventory = useHostInventory();
 
   const clusters: ClusterType[] = ['singlesite-b', 'singlesite-z', 'itbc'];
@@ -28,71 +28,101 @@ function Overview() {
     return { total, bew, zoi, itbc };
   };
 
-  // Get data for a customer in a specific cluster
-  const getCustomerClusterData = (customerId: string, cluster: ClusterType) => {
+  // Build customer data for a cluster (same logic as CapacityPlanning)
+  const buildClusterData = (cluster: ClusterType) => {
     const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
     const socketFactor = CLUSTER_SOCKET_FACTOR[cluster];
 
-    const customerClusterVMs = customerVMs.filter(
-      (vm) => vm.customerId === customerId && vm.cluster === cluster
-    );
+    // Get host additions for this cluster, sorted by date
+    const clusterHostAdditions = hostAdditions
+      .filter((ha) => clusterHostTypes.some((ht) => ht.id === ha.hostTypeId))
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-    if (customerClusterVMs.length === 0) {
-      return {
-        hasVMs: false,
-        vms: [],
-        totalSockets: 0,
-        requiredHosts: [],
-        needsHosts: false,
-      };
-    }
+    let usedHostAdditions = 0;
+    let runningCapacity = 0;
+    let runningUsage = 0;
 
-    const vms = customerClusterVMs.map((vm) => {
-      const vmType = vmTypes.find((vt) => vt.id === vm.vmTypeId);
-      return {
-        vmTypeName: vmType?.name || '?',
-        count: vm.count,
-        sockets: (vmType?.sockets || 0) * vm.count * socketFactor,
-        allowedHostTypes: vmType?.allowedHostTypes || [],
-      };
-    });
+    const customerData: Record<string, {
+      hasVMs: boolean;
+      vms: { vmTypeName: string; count: number }[];
+      hostsToAdd: { hostType: typeof clusterHostTypes[0]; count: number }[];
+      needsMoreHosts: boolean;
+      socketsShortfall: number;
+    }> = {};
 
-    const totalSockets = vms.reduce((sum, vm) => sum + vm.sockets, 0);
-
-    // Calculate hosts needed for this customer's VMs (grouped by host type)
-    const hostsNeededByType: Record<string, number> = {};
-
-    vms.forEach((vm) => {
-      // Find the first allowed host type in this cluster
-      const allowedInCluster = vm.allowedHostTypes.filter((htId) =>
-        clusterHostTypes.some((ht) => ht.id === htId)
+    sortedCustomers.forEach((customer) => {
+      const customerClusterVMs = customerVMs.filter(
+        (vm) => vm.customerId === customer.id && vm.cluster === cluster
       );
 
-      if (allowedInCluster.length > 0) {
-        const htId = allowedInCluster[0];
-        const ht = clusterHostTypes.find((h) => h.id === htId);
-        if (ht) {
-          // Add sockets needed, we'll convert to hosts later
-          hostsNeededByType[htId] = (hostsNeededByType[htId] || 0) + vm.sockets;
-        }
+      const vms = customerClusterVMs.map((vm) => {
+        const vmType = vmTypes.find((vt) => vt.id === vm.vmTypeId);
+        return {
+          vmTypeName: vmType?.name || '?',
+          count: vm.count,
+          sockets: vmType ? vm.count * vmType.sockets * socketFactor : 0,
+        };
+      });
+
+      const customerSockets = vms.reduce((sum, vm) => sum + vm.sockets, 0);
+
+      if (customerClusterVMs.length === 0) {
+        customerData[customer.id] = {
+          hasVMs: false,
+          vms: [],
+          hostsToAdd: [],
+          needsMoreHosts: false,
+          socketsShortfall: 0,
+        };
+        return;
       }
+
+      // Calculate how many hosts are needed for this customer
+      const capacityNeeded = runningUsage + customerSockets;
+
+      // Collect hosts to add for this customer
+      const hostsToAdd: { hostType: typeof clusterHostTypes[0]; count: number }[] = [];
+      const hostCounts: Record<string, number> = {};
+
+      while (usedHostAdditions < clusterHostAdditions.length && runningCapacity < capacityNeeded) {
+        const ha = clusterHostAdditions[usedHostAdditions];
+        const ht = DEFAULT_HOST_TYPES.find((h) => h.id === ha.hostTypeId);
+        if (ht) {
+          runningCapacity += ha.count * ht.sockets;
+          hostCounts[ht.id] = (hostCounts[ht.id] || 0) + ha.count;
+        }
+        usedHostAdditions++;
+      }
+
+      // Convert to array
+      Object.entries(hostCounts).forEach(([htId, count]) => {
+        const ht = clusterHostTypes.find((h) => h.id === htId);
+        if (ht && count > 0) {
+          hostsToAdd.push({ hostType: ht, count });
+        }
+      });
+
+      runningUsage += customerSockets;
+      const needsMoreHosts = runningUsage > runningCapacity;
+      const socketsShortfall = Math.max(0, runningUsage - runningCapacity);
+
+      customerData[customer.id] = {
+        hasVMs: true,
+        vms,
+        hostsToAdd,
+        needsMoreHosts,
+        socketsShortfall,
+      };
     });
 
-    // Convert sockets to number of hosts needed
-    const requiredHosts = Object.entries(hostsNeededByType).map(([htId, sockets]) => {
-      const ht = clusterHostTypes.find((h) => h.id === htId);
-      if (!ht) return null;
-      const hostsNeeded = Math.ceil(sockets / ht.sockets);
-      return { hostType: ht, needed: hostsNeeded };
-    }).filter((h): h is { hostType: typeof clusterHostTypes[0]; needed: number } => h !== null && h.needed > 0);
+    return customerData;
+  };
 
-    return {
-      hasVMs: true,
-      vms,
-      totalSockets,
-      requiredHosts,
-      needsHosts: requiredHosts.length > 0,
-    };
+  // Pre-calculate data for all clusters
+  const clusterData: Record<ClusterType, ReturnType<typeof buildClusterData>> = {
+    'singlesite-b': buildClusterData('singlesite-b'),
+    'singlesite-z': buildClusterData('singlesite-z'),
+    'itbc': buildClusterData('itbc'),
   };
 
   // Get host totals by size (L, XL, XXL) across all clusters
@@ -286,10 +316,22 @@ function Overview() {
                   </div>
                 </td>
                 {clusters.map((cluster) => {
-                  const data = getCustomerClusterData(customer.id, cluster);
+                  const data = clusterData[cluster][customer.id];
+                  if (!data) {
+                    return <td key={cluster} className="px-4 py-3 bg-gray-50"><span className="text-gray-400 text-sm">—</span></td>;
+                  }
 
                   // Determine background color
-                  const bgClass = data.hasVMs ? 'bg-green-50' : 'bg-gray-50';
+                  let bgClass = 'bg-gray-50';
+                  if (data.hasVMs) {
+                    if (data.needsMoreHosts) {
+                      bgClass = 'bg-orange-100';
+                    } else if (data.hostsToAdd.length > 0) {
+                      bgClass = 'bg-yellow-50';
+                    } else {
+                      bgClass = 'bg-green-50';
+                    }
+                  }
 
                   return (
                     <td key={cluster} className={`px-4 py-3 ${bgClass}`}>
@@ -302,16 +344,21 @@ function Overview() {
                               </span>
                             ))}
                           </div>
-                          {data.requiredHosts.length > 0 && (
+                          {data.hostsToAdd.length > 0 && (
                             <div className="flex flex-wrap gap-1 mt-1">
-                              {data.requiredHosts.map((h) => (
+                              {data.hostsToAdd.map((h) => (
                                 <span
                                   key={h.hostType.id}
-                                  className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-medium"
+                                  className="text-xs px-1.5 py-0.5 rounded bg-blue-200 text-blue-800 font-medium"
                                 >
-                                  {h.needed}× {h.hostType.name}
+                                  +{h.count}× {h.hostType.name}
                                 </span>
                               ))}
+                            </div>
+                          )}
+                          {data.needsMoreHosts && (
+                            <div className="text-xs text-red-600 mt-1 font-medium">
+                              ⚠️ +{data.socketsShortfall}S fehlen
                             </div>
                           )}
                         </div>
@@ -336,18 +383,26 @@ function Overview() {
       {/* Legend */}
       <div className="bg-white rounded-lg shadow p-4">
         <h3 className="font-semibold text-gray-800 mb-2">Legende</h3>
-        <div className="flex gap-6 text-sm">
+        <div className="flex flex-wrap gap-6 text-sm">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-gray-50 border rounded"></div>
             <span>Keine VMs</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-green-50 border border-green-200 rounded"></div>
-            <span>VMs vorhanden</span>
+            <span>Kapazität OK</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 text-xs rounded font-medium">2× L</span>
-            <span>Benötigte Hosts</span>
+            <div className="w-6 h-6 bg-yellow-50 border border-yellow-200 rounded"></div>
+            <span>Hosts einbauen</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 bg-orange-100 border border-orange-300 rounded"></div>
+            <span>Kapazität fehlt</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="px-1.5 py-0.5 bg-blue-200 text-blue-800 text-xs rounded font-medium">+2× L</span>
+            <span>Hosts einzubauen</span>
           </div>
         </div>
       </div>
