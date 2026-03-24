@@ -10,6 +10,24 @@ function Overview() {
   // Sort customers by position
   const sortedCustomers = [...customers].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 
+  // Get VM counts for a customer (count = number of VMs, not sockets)
+  const getCustomerVMCounts = (customerId: string) => {
+    const customerAllVMs = customerVMs.filter((vm) => vm.customerId === customerId);
+
+    const total = customerAllVMs.reduce((sum, vm) => sum + vm.count, 0);
+    const bew = customerAllVMs
+      .filter((vm) => vm.cluster === 'singlesite-b')
+      .reduce((sum, vm) => sum + vm.count, 0);
+    const zoi = customerAllVMs
+      .filter((vm) => vm.cluster === 'singlesite-z')
+      .reduce((sum, vm) => sum + vm.count, 0);
+    const itbc = customerAllVMs
+      .filter((vm) => vm.cluster === 'itbc')
+      .reduce((sum, vm) => sum + vm.count, 0);
+
+    return { total, bew, zoi, itbc };
+  };
+
   // Get data for a customer in a specific cluster
   const getCustomerClusterData = (customerId: string, cluster: ClusterType) => {
     const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
@@ -128,12 +146,28 @@ function Overview() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
-            {sortedCustomers.map((customer, index) => (
+            {sortedCustomers.map((customer, index) => {
+              const vmCounts = getCustomerVMCounts(customer.id);
+              return (
               <tr key={customer.id} className="hover:bg-gray-50">
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
                     <span className="text-gray-400 text-sm">{index + 1}.</span>
                     <span className="font-medium text-gray-800">{customer.name}</span>
+                  </div>
+                  <div className="flex gap-2 mt-1 text-xs">
+                    <span className="text-gray-600">
+                      {vmCounts.total} VMs
+                    </span>
+                    {vmCounts.bew > 0 && (
+                      <span className="text-blue-600">BEW: {vmCounts.bew}</span>
+                    )}
+                    {vmCounts.zoi > 0 && (
+                      <span className="text-purple-600">ZOI: {vmCounts.zoi}</span>
+                    )}
+                    {vmCounts.itbc > 0 && (
+                      <span className="text-green-600">ITBC: {vmCounts.itbc}</span>
+                    )}
                   </div>
                 </td>
                 {clusters.map((cluster) => {
@@ -189,7 +223,7 @@ function Overview() {
                   );
                 })}
               </tr>
-            ))}
+            )})}
           </tbody>
         </table>
 

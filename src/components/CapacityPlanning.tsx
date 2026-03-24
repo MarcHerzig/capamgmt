@@ -102,9 +102,8 @@ function CapacityPlanning() {
   };
 
   const buildCustomerBlocks = (): CustomerBlock[] => {
-    // Get customers with VMs in this cluster, sorted by position
-    const customersWithVMs = customers
-      .filter((c) => clusterVMs.some((vm) => vm.customerId === c.id))
+    // Get ALL customers sorted by position (show all, even without VMs)
+    const allCustomersSorted = [...customers]
       .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
 
     // Get host additions for this cluster, sorted by date
@@ -116,7 +115,7 @@ function CapacityPlanning() {
     let runningCapacity = 0;
     let runningUsage = 0;
 
-    return customersWithVMs.map((customer) => {
+    return allCustomersSorted.map((customer) => {
       const customerClusterVMs = clusterVMs.filter((vm) => vm.customerId === customer.id);
 
       // Build VM list
@@ -466,24 +465,35 @@ function CapacityPlanning() {
           </p>
         </div>
 
-        {customerBlocks.length === 0 ? (
+        {customers.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
-            Keine Kunden mit VMs für diesen Cluster
+            Keine Kunden erfasst
           </div>
         ) : (
           <div className="divide-y-4 divide-gray-300">
             {customerBlocks.map((block, index) => (
-              <div key={block.customer.id} className={`${block.needsMoreHosts ? 'bg-red-50' : ''}`}>
+              <div key={block.customer.id} className={`${block.needsMoreHosts && block.vms.length > 0 ? 'bg-red-50' : ''}`}>
                 {/* Customer Header */}
                 <div className={`px-4 py-3 flex items-center justify-between ${
-                  block.needsMoreHosts ? 'bg-red-100' : 'bg-blue-50'
+                  block.vms.length === 0
+                    ? 'bg-gray-100'
+                    : block.needsMoreHosts
+                      ? 'bg-red-100'
+                      : 'bg-blue-50'
                 }`}>
                   <div className="flex items-center gap-3">
                     <span className="text-gray-400 font-medium">{index + 1}.</span>
-                    <span className="font-semibold text-gray-800 text-lg">👤 {block.customer.name}</span>
-                    {block.needsMoreHosts && (
+                    <span className={`font-semibold text-lg ${block.vms.length === 0 ? 'text-gray-500' : 'text-gray-800'}`}>
+                      👤 {block.customer.name}
+                    </span>
+                    {block.needsMoreHosts && block.vms.length > 0 && (
                       <span className="px-2 py-1 bg-red-600 text-white text-xs rounded">
                         ⚠️ Hosts benötigt!
+                      </span>
+                    )}
+                    {block.vms.length === 0 && (
+                      <span className="text-gray-400 text-sm italic">
+                        (keine VMs)
                       </span>
                     )}
                   </div>
@@ -498,7 +508,7 @@ function CapacityPlanning() {
                 </div>
 
                 {/* Warning if hosts needed */}
-                {block.needsMoreHosts && (
+                {block.needsMoreHosts && block.vms.length > 0 && (
                   <div className="px-4 py-2 bg-orange-100 border-y border-orange-300">
                     <div className="flex items-center justify-between">
                       <div>
@@ -570,63 +580,75 @@ function CapacityPlanning() {
                 {/* VMs */}
                 <div className="px-4 py-2">
                   <div className="text-xs text-gray-500 mb-1">VMs:</div>
-                  <div className="space-y-1">
-                    {block.vms.map((vm) => {
-                      const customerVM = clusterVMs.find(
-                        (cv) => cv.customerId === block.customer.id && cv.vmTypeId === vm.vmTypeId
-                      );
-                      const neededHtNames = vm.allowedHostTypes
-                        .filter((htId) => clusterHostTypes.some((ht) => ht.id === htId))
-                        .map((htId) => {
-                          const ht = DEFAULT_HOST_TYPES.find((h) => h.id === htId);
-                          const inv = hostInventory.find((i) => i.hostTypeId === htId);
-                          const hasHost = inv && inv.totalHosts > 0;
-                          return { name: ht?.name, hasHost };
-                        });
+                  {block.vms.length === 0 ? (
+                    <div className="text-gray-400 italic text-sm py-2">
+                      Keine VMs in diesem Cluster
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      {block.vms.map((vm) => {
+                        const customerVM = clusterVMs.find(
+                          (cv) => cv.customerId === block.customer.id && cv.vmTypeId === vm.vmTypeId
+                        );
+                        const neededHtNames = vm.allowedHostTypes
+                          .filter((htId) => clusterHostTypes.some((ht) => ht.id === htId))
+                          .map((htId) => {
+                            const ht = DEFAULT_HOST_TYPES.find((h) => h.id === htId);
+                            const inv = hostInventory.find((i) => i.hostTypeId === htId);
+                            const hasHost = inv && inv.totalHosts > 0;
+                            return { name: ht?.name, hasHost };
+                          });
 
-                      return (
-                        <div key={vm.vmTypeId} className="flex items-center justify-between py-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-gray-700">
-                              💾 {vm.count}× {vm.vmTypeName}
-                            </span>
-                            <span className="text-gray-500 text-sm">
-                              ({vm.sockets}S)
-                            </span>
-                            <div className="flex gap-1">
-                              {neededHtNames.map((ht, i) => (
-                                <span
-                                  key={i}
-                                  className={`text-xs px-1 py-0.5 rounded ${
-                                    ht.hasHost
-                                      ? 'bg-blue-100 text-blue-700'
-                                      : 'bg-red-100 text-red-700'
-                                  }`}
-                                >
-                                  {ht.name} {ht.hasHost ? '✓' : '✗'}
-                                </span>
-                              ))}
+                        return (
+                          <div key={vm.vmTypeId} className="flex items-center justify-between py-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-gray-700">
+                                💾 {vm.count}× {vm.vmTypeName}
+                              </span>
+                              <span className="text-gray-500 text-sm">
+                                ({vm.sockets}S)
+                              </span>
+                              <div className="flex gap-1">
+                                {neededHtNames.map((ht, i) => (
+                                  <span
+                                    key={i}
+                                    className={`text-xs px-1 py-0.5 rounded ${
+                                      ht.hasHost
+                                        ? 'bg-blue-100 text-blue-700'
+                                        : 'bg-red-100 text-red-700'
+                                    }`}
+                                  >
+                                    {ht.name} {ht.hasHost ? '✓' : '✗'}
+                                  </span>
+                                ))}
+                              </div>
                             </div>
+                            {customerVM && (
+                              <button
+                                onClick={() => removeCustomerVM(customerVM.id)}
+                                className="text-red-600 hover:text-red-800 text-xs"
+                              >
+                                ×
+                              </button>
+                            )}
                           </div>
-                          {customerVM && (
-                            <button
-                              onClick={() => removeCustomerVM(customerVM.id)}
-                              className="text-red-600 hover:text-red-800 text-xs"
-                            >
-                              ×
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 {/* Status line */}
                 <div className={`px-4 py-2 text-right text-sm ${
-                  block.needsMoreHosts ? 'bg-red-100 text-red-700' : 'bg-green-50 text-green-700'
+                  block.vms.length === 0
+                    ? 'bg-gray-50 text-gray-500'
+                    : block.needsMoreHosts
+                      ? 'bg-red-100 text-red-700'
+                      : 'bg-green-50 text-green-700'
                 }`}>
-                  {block.needsMoreHosts ? (
+                  {block.vms.length === 0 ? (
+                    <span>— Keine VMs</span>
+                  ) : block.needsMoreHosts ? (
                     <span>⚠️ Fehlend: {block.socketsShortfall}S</span>
                   ) : (
                     <span>✓ OK - Verbleibend: {block.runningCapacityAfter - block.runningUsageAfter}S</span>
