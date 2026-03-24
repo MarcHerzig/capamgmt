@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useStore } from '../stores/useStore';
 
 function CustomerList() {
-  const { customers, addCustomer, updateCustomer, deleteCustomer, moveCustomerUp, moveCustomerDown } = useStore();
+  const { customers, addCustomer, updateCustomer, deleteCustomer } = useStore();
   const [newName, setNewName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -33,13 +33,57 @@ function CustomerList() {
     setEditName('');
   };
 
+  const handlePositionChange = (customerId: string, newPosition: number) => {
+    // Clamp position between 1 and customer count
+    const clampedPosition = Math.max(1, Math.min(customers.length, newPosition));
+
+    // Get current customer
+    const currentCustomer = customers.find(c => c.id === customerId);
+    if (!currentCustomer) return;
+
+    const oldPosition = (currentCustomer.position ?? 0) + 1; // 1-based for display
+
+    if (clampedPosition === oldPosition) return;
+
+    // Reorder all customers
+    const newCustomers = sortedCustomers.map((c, index) => {
+      if (c.id === customerId) {
+        return { ...c, position: clampedPosition - 1 }; // Convert back to 0-based
+      }
+
+      const currentPos = index;
+      const targetPos = clampedPosition - 1;
+      const originalPos = sortedCustomers.findIndex(sc => sc.id === customerId);
+
+      // Shift other customers
+      if (originalPos < targetPos) {
+        // Moving down: shift customers between old and new position up
+        if (currentPos > originalPos && currentPos <= targetPos) {
+          return { ...c, position: currentPos - 1 };
+        }
+      } else {
+        // Moving up: shift customers between new and old position down
+        if (currentPos >= targetPos && currentPos < originalPos) {
+          return { ...c, position: currentPos + 1 };
+        }
+      }
+
+      return { ...c, position: currentPos };
+    });
+
+    // Update all customers
+    newCustomers.forEach(c => {
+      updateCustomer(c.id, { position: c.position });
+    });
+  };
+
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-lg shadow">
         <div className="p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-800">Kunden erfassen</h2>
           <p className="text-sm text-gray-500 mt-1">
-            Erfasse hier die Kunden und ordne sie in der Migrationsreihenfolge.
+            Erfasse hier die Kunden. Position = Migrationsreihenfolge (Nummer eingeben zum Ändern).
           </p>
         </div>
 
@@ -71,27 +115,16 @@ function CustomerList() {
                   key={customer.id}
                   className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg hover:bg-gray-100"
                 >
-                  {/* Position controls */}
-                  <div className="flex flex-col gap-0.5">
-                    <button
-                      onClick={() => moveCustomerUp(customer.id)}
-                      disabled={index === 0}
-                      className="w-6 h-5 flex items-center justify-center bg-gray-200 hover:bg-gray-300 disabled:opacity-30 disabled:hover:bg-gray-200 rounded text-xs"
-                      title="Nach oben"
-                    >
-                      ▲
-                    </button>
-                    <button
-                      onClick={() => moveCustomerDown(customer.id)}
-                      disabled={index === sortedCustomers.length - 1}
-                      className="w-6 h-5 flex items-center justify-center bg-gray-200 hover:bg-gray-300 disabled:opacity-30 disabled:hover:bg-gray-200 rounded text-xs"
-                      title="Nach unten"
-                    >
-                      ▼
-                    </button>
-                  </div>
-
-                  <span className="text-gray-400 text-sm w-6">{index + 1}.</span>
+                  {/* Position input */}
+                  <input
+                    type="number"
+                    min="1"
+                    max={customers.length}
+                    value={index + 1}
+                    onChange={(e) => handlePositionChange(customer.id, parseInt(e.target.value) || 1)}
+                    className="w-14 px-2 py-1 text-center border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    title="Position ändern"
+                  />
 
                   {editingId === customer.id ? (
                     <>
