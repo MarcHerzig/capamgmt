@@ -52,75 +52,15 @@ interface AppState {
 const initialVMTypes: VMType[] = [
   {
     id: generateId(),
-    name: 'S',
-    sockets: 0.5,
-    allowedHostTypes: ['sb-l', 'sz-l', 'itbc-l'],
-  },
-  {
-    id: generateId(),
-    name: 'M',
-    sockets: 1,
-    allowedHostTypes: ['sb-l', 'sz-l', 'itbc-l'],
+    name: 'Standard',
+    sockets: 2,
+    allowedHostTypes: ['sb-l', 'sb-xl', 'sz-l', 'sz-xl', 'itbc-l', 'itbc-xl', 'itbc-xxl'],
   },
   {
     id: generateId(),
     name: 'Large',
-    sockets: 2,
-    allowedHostTypes: ['sb-xl', 'sz-xl', 'itbc-xl'],
-  },
-  {
-    id: generateId(),
-    name: 'XL',
-    sockets: 3,
-    allowedHostTypes: ['sb-xl', 'sz-xl', 'itbc-xl'],
-  },
-  {
-    id: generateId(),
-    name: 'XLo',
-    sockets: 3,
-    allowedHostTypes: ['sb-xl', 'sz-xl', 'itbc-xl'],
-  },
-  {
-    id: generateId(),
-    name: 'XXL',
     sockets: 4,
-    allowedHostTypes: ['itbc-xxl'],
-  },
-  {
-    id: generateId(),
-    name: '3XL',
-    sockets: 4,
-    allowedHostTypes: ['sb-xl', 'sz-xl', 'itbc-xl'],
-  },
-  {
-    id: generateId(),
-    name: '3XLo',
-    sockets: 4,
-    allowedHostTypes: ['sb-xl', 'sz-xl', 'itbc-xl'],
-  },
-  {
-    id: generateId(),
-    name: '4XL',
-    sockets: 3,
-    allowedHostTypes: ['itbc-xxl'],
-  },
-  {
-    id: generateId(),
-    name: '4XLo',
-    sockets: 3,
-    allowedHostTypes: ['itbc-xxl'],
-  },
-  {
-    id: generateId(),
-    name: '6XL',
-    sockets: 4,
-    allowedHostTypes: ['itbc-xxl'],
-  },
-  {
-    id: generateId(),
-    name: '6XLo',
-    sockets: 4,
-    allowedHostTypes: ['itbc-xxl'],
+    allowedHostTypes: ['sb-xl', 'sz-xl', 'itbc-xl', 'itbc-xxl'],
   },
 ];
 
