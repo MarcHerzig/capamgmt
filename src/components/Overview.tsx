@@ -337,20 +337,19 @@ function Overview() {
                               </span>
                             ))}
                           </div>
-                          <div className="text-sm font-medium text-gray-700">
-                            {data.totalSockets}S
-                          </div>
-                          {data.additionalHosts.length > 0 && (
+                          {data.additionalHosts.length > 0 ? (
                             <div className="flex flex-wrap gap-1 mt-1">
                               {data.additionalHosts.map((h) => (
                                 <span
                                   key={h.hostType.id}
                                   className="text-xs px-1.5 py-0.5 rounded bg-red-200 text-red-800 font-medium"
                                 >
-                                  +{h.needed} {h.hostType.name}
+                                  +{h.needed}× {h.hostType.name}
                                 </span>
                               ))}
                             </div>
+                          ) : (
+                            <div className="text-xs text-green-600 mt-1">✓ OK</div>
                           )}
                         </div>
                       ) : (
