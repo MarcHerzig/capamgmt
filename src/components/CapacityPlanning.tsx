@@ -690,6 +690,151 @@ function CapacityPlanning() {
           </div>
         )}
 
+        {/* Reserve Capacity Row - After all migrations */}
+        {customerBlocks.length > 0 && (
+          <div className="border-t-4 border-purple-300">
+            {(() => {
+              // Calculate reserve requirements
+              // Get final state of assigned hosts per type
+              const lastBlock = customerBlocks[customerBlocks.length - 1];
+              const finalHostsAssigned = lastBlock?.runningHostsAssigned || {};
+
+              // Build detailed info per host type
+              const hostTypeDetails = clusterHostTypes.map((ht) => {
+                const assigned = finalHostsAssigned[ht.id] || 0;
+                const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+                const available = inv?.totalHosts || 0;
+                const freeHosts = available - assigned;
+
+                let totalNeeded: number;
+                let reserveRequired: number;
+                let reserveReason: string;
+
+                if (selectedCluster === 'itbc') {
+                  // ITBC: 50% Reserve ist bereits durch 2x Faktor abgedeckt
+                  // Keine zusätzliche Reserve nötig
+                  totalNeeded = assigned;
+                  reserveRequired = 0;
+                  reserveReason = '50% bereits eingerechnet';
+                } else {
+                  // Singlesite: 1 Ersatz-Host pro genutztem Typ
+                  totalNeeded = assigned > 0 ? assigned + 1 : 0;
+                  reserveRequired = assigned > 0 ? 1 : 0;
+                  reserveReason = '1 Ersatz-Host';
+                }
+
+                const additionalNeeded = Math.max(0, totalNeeded - available);
+
+                return {
+                  hostType: ht,
+                  assigned,
+                  available,
+                  freeHosts,
+                  totalNeeded,
+                  reserveRequired,
+                  reserveReason,
+                  additionalNeeded,
+                  isUsed: assigned > 0,
+                };
+              }).filter((d) => d.isUsed || d.available > 0);
+
+              const reserveNeeds = hostTypeDetails.filter((d) => d.additionalNeeded > 0);
+              const hasReserveNeeds = reserveNeeds.length > 0;
+
+              return (
+                <div className={hasReserveNeeds ? 'bg-purple-50' : 'bg-green-50'}>
+                  <div className={`px-4 py-3 flex items-center justify-between ${
+                    hasReserveNeeds ? 'bg-purple-100' : 'bg-green-100'
+                  }`}>
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 font-medium">∞</span>
+                      <span className="font-semibold text-lg text-gray-800">
+                        🛡️ Reserve-Kapazität
+                      </span>
+                      {hasReserveNeeds && (
+                        <span className="px-2 py-1 bg-purple-600 text-white text-xs rounded">
+                          Hosts für Reserve benötigt
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-right text-sm text-gray-600">
+                      {selectedCluster === 'itbc'
+                        ? '50% Reserve bereits im 2x Faktor'
+                        : '1 Ersatz-Host pro Typ'}
+                    </div>
+                  </div>
+
+                  {/* Show current state per host type */}
+                  <div className="px-4 py-3 border-b border-purple-200">
+                    <div className="text-xs text-gray-500 mb-2">Aktuelle Belegung:</div>
+                    <div className="grid grid-cols-1 gap-2">
+                      {hostTypeDetails.map((d) => (
+                        <div key={d.hostType.id} className="flex items-center justify-between bg-white rounded p-2">
+                          <div className="flex items-center gap-3">
+                            <span className="font-medium text-gray-700">{d.hostType.name} Hosts:</span>
+                            <span className="text-sm">
+                              <span className="text-blue-600 font-medium">{d.assigned} belegt</span>
+                              <span className="text-gray-400 mx-1">/</span>
+                              <span className="text-gray-600">{d.available} vorhanden</span>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm ${d.freeHosts >= d.reserveRequired ? 'text-green-600' : 'text-red-600'}`}>
+                              {d.freeHosts} frei
+                            </span>
+                            <span className="text-xs text-gray-400">
+                              (benötigt: {d.reserveRequired} für {d.reserveReason})
+                            </span>
+                            {d.additionalNeeded > 0 && (
+                              <span className="px-2 py-0.5 bg-purple-200 text-purple-800 text-xs rounded font-medium">
+                                +{d.additionalNeeded} fehlt
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {hasReserveNeeds ? (
+                    <div className="px-4 py-3">
+                      <div className="text-sm text-purple-800 mb-2">
+                        Zusätzliche Hosts für Reserve-Kapazität:
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {reserveNeeds.map((d) => (
+                          <div key={d.hostType.id} className="flex items-center gap-2">
+                            <span className="px-2 py-1 bg-purple-200 text-purple-800 rounded text-sm font-medium">
+                              +{d.additionalNeeded}× {d.hostType.name}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex gap-1 mt-3">
+                        {reserveNeeds.map((d) => (
+                          <button
+                            key={d.hostType.id}
+                            onClick={() => {
+                              for (let i = 0; i < d.additionalNeeded; i++) addHost(d.hostType.id);
+                            }}
+                            className="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white text-xs rounded"
+                          >
+                            +{d.additionalNeeded}× {d.hostType.name} hinzufügen
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="px-4 py-3 text-green-700">
+                      ✓ Reserve-Kapazität ausreichend
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
         {/* Quick add host buttons when capacity exceeded */}
         {capacityExceeded && (
           <div className="p-4 bg-red-50 border-t border-red-200">

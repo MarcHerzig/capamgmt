@@ -395,6 +395,95 @@ function Overview() {
                 })}
               </tr>
             )})}
+
+            {/* Reserve Row */}
+            {sortedCustomers.length > 0 && (
+              <tr className="bg-purple-50 border-t-2 border-purple-300">
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-purple-400 text-sm">🛡️</span>
+                    <span className="font-medium text-purple-800">Reserve-Kapazität</span>
+                  </div>
+                  <div className="text-xs text-purple-600 mt-1">
+                    Failover-Reserve
+                  </div>
+                </td>
+                {clusters.map((cluster) => {
+                  const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
+                  const data = clusterData[cluster];
+
+                  // Calculate detailed info per host type
+                  const hostTypeDetails = clusterHostTypes.map((ht) => {
+                    const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+                    const available = inv?.totalHosts || 0;
+
+                    // Calculate hosts assigned (used by VMs)
+                    let assigned = 0;
+                    Object.values(data).forEach((cd) => {
+                      cd.hostsToAdd.forEach((h) => {
+                        if (h.hostType.id === ht.id) assigned += h.count;
+                      });
+                    });
+
+                    const freeHosts = available - assigned;
+
+                    let totalNeeded: number;
+                    let reserveRequired: number;
+
+                    if (cluster === 'itbc') {
+                      // ITBC: 50% Reserve ist bereits durch 2x Faktor abgedeckt
+                      totalNeeded = assigned;
+                      reserveRequired = 0;
+                    } else {
+                      // Singlesite: 1 Ersatz-Host pro genutztem Typ
+                      totalNeeded = assigned > 0 ? assigned + 1 : 0;
+                      reserveRequired = assigned > 0 ? 1 : 0;
+                    }
+
+                    const additionalNeeded = Math.max(0, totalNeeded - available);
+
+                    return {
+                      hostType: ht,
+                      assigned,
+                      available,
+                      freeHosts,
+                      reserveRequired,
+                      additionalNeeded,
+                      isUsed: assigned > 0 || available > 0,
+                    };
+                  }).filter((d) => d.isUsed);
+
+                  const reserveNeeds = hostTypeDetails.filter((d) => d.additionalNeeded > 0);
+                  const hasNeeds = reserveNeeds.length > 0;
+
+                  return (
+                    <td key={cluster} className={`px-4 py-3 ${hasNeeds ? 'bg-purple-100' : 'bg-green-50'}`}>
+                      {hostTypeDetails.length > 0 ? (
+                        <div className="space-y-1">
+                          {hostTypeDetails.map((d) => (
+                            <div key={d.hostType.id} className="text-xs">
+                              <span className="font-medium">{d.hostType.name}:</span>{' '}
+                              <span className="text-blue-600">{d.assigned}</span>
+                              <span className="text-gray-400">/</span>
+                              <span className="text-gray-600">{d.available}</span>
+                              {d.additionalNeeded > 0 ? (
+                                <span className="ml-1 px-1 py-0.5 bg-purple-200 text-purple-800 rounded font-medium">
+                                  +{d.additionalNeeded}
+                                </span>
+                              ) : d.assigned > 0 ? (
+                                <span className="ml-1 text-green-600">✓</span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-gray-400 text-sm">—</span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            )}
           </tbody>
         </table>
 
