@@ -81,6 +81,67 @@ function Overview() {
     };
   };
 
+  // Get host totals by size (L, XL, XXL) across all clusters
+  const getHostTotalsBySize = () => {
+    const sizes = ['L', 'XL', 'XXL'] as const;
+
+    return sizes.map((size) => {
+      // Find all host types of this size
+      const hostTypesOfSize = DEFAULT_HOST_TYPES.filter((ht) => ht.name === size);
+
+      // Total hosts available
+      const totalHosts = hostTypesOfSize.reduce((sum, ht) => {
+        const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+        return sum + (inv?.totalHosts || 0);
+      }, 0);
+
+      // Total sockets available
+      const totalSockets = hostTypesOfSize.reduce((sum, ht) => {
+        const inv = hostInventory.find((i) => i.hostTypeId === ht.id);
+        return sum + (inv?.totalHosts || 0) * ht.sockets;
+      }, 0);
+
+      // Used sockets - VMs that can run on this host size
+      const usedSockets = hostTypesOfSize.reduce((hostSum, ht) => {
+        const socketFactor = CLUSTER_SOCKET_FACTOR[ht.cluster];
+        const clusterVMs = customerVMs.filter((vm) => vm.cluster === ht.cluster);
+
+        const usedOnHost = clusterVMs.reduce((vmSum, vm) => {
+          const vmType = vmTypes.find((vt) => vt.id === vm.vmTypeId);
+          if (!vmType || !vmType.allowedHostTypes.includes(ht.id)) return vmSum;
+          return vmSum + vm.count * vmType.sockets * socketFactor;
+        }, 0);
+
+        return hostSum + usedOnHost;
+      }, 0);
+
+      // Per cluster breakdown
+      const perCluster = clusters.map((cluster) => {
+        const clusterHostType = hostTypesOfSize.find((ht) => ht.cluster === cluster);
+        if (!clusterHostType) return { cluster, hosts: 0, exists: false };
+
+        const inv = hostInventory.find((i) => i.hostTypeId === clusterHostType.id);
+        return {
+          cluster,
+          hosts: inv?.totalHosts || 0,
+          exists: true,
+        };
+      });
+
+      return {
+        size,
+        totalHosts,
+        totalSockets,
+        usedSockets,
+        freeSockets: totalSockets - usedSockets,
+        isOver: usedSockets > totalSockets,
+        perCluster,
+      };
+    });
+  };
+
+  const hostTotalsBySize = getHostTotalsBySize();
+
   // Get cluster totals
   const getClusterTotals = (cluster: ClusterType) => {
     const clusterHostTypes = DEFAULT_HOST_TYPES.filter((ht) => ht.cluster === cluster);
@@ -103,6 +164,46 @@ function Overview() {
 
   return (
     <div className="space-y-6">
+      {/* Host Types by Size - Total across all clusters */}
+      <div className="grid grid-cols-3 gap-4">
+        {hostTotalsBySize.map((hostSize) => (
+          <div
+            key={hostSize.size}
+            className={`rounded-lg shadow p-4 ${
+              hostSize.isOver ? 'bg-red-50' : 'bg-white'
+            }`}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-bold text-xl text-gray-800">{hostSize.size} Hosts</h3>
+              <span className={`text-2xl font-bold ${hostSize.isOver ? 'text-red-600' : 'text-blue-600'}`}>
+                {hostSize.totalHosts}
+              </span>
+            </div>
+            <div className={`text-sm ${hostSize.isOver ? 'text-red-600' : 'text-gray-600'}`}>
+              {hostSize.usedSockets} / {hostSize.totalSockets} Sockets
+              {hostSize.isOver && ' ⚠️'}
+            </div>
+            <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className={`h-full ${hostSize.isOver ? 'bg-red-500' : 'bg-blue-500'}`}
+                style={{
+                  width: `${Math.min(100, hostSize.totalSockets > 0 ? (hostSize.usedSockets / hostSize.totalSockets) * 100 : 0)}%`,
+                }}
+              />
+            </div>
+            <div className="mt-2 flex gap-2 text-xs">
+              {hostSize.perCluster.map((pc) => (
+                pc.exists && (
+                  <span key={pc.cluster} className="text-gray-500">
+                    {CLUSTER_NAMES[pc.cluster].split(' ')[1] || CLUSTER_NAMES[pc.cluster]}: {pc.hosts}
+                  </span>
+                )
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
       {/* Header with cluster totals */}
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-white rounded-lg shadow p-4">
